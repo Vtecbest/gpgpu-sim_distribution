@@ -2097,10 +2097,10 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
   }
 }
 
-void ldst_unit::L1_latency_queue_cycle() {
+void ldst_unit::L1_latency_queue_cycle() {//主要负责访存的单元
   for (unsigned int j = 0; j < m_config->m_L1D_config.l1_banks; j++) {
     if ((l1_latency_queue[j][0]) != NULL) {
-      mem_fetch *mf_next = l1_latency_queue[j][0];
+      mem_fetch *mf_next = l1_latency_queue[j][0];//访问的是stage=0的memory request
       std::list<cache_event> events;
       enum cache_request_status status =
           m_L1D->access(mf_next->get_addr(), mf_next,
@@ -2118,16 +2118,16 @@ void ldst_unit::L1_latency_queue_cycle() {
           for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++)
             if (mf_next->get_inst().out[r] > 0) {
               assert(m_pending_writes[mf_next->get_inst().warp_id()]
-                                     [mf_next->get_inst().out[r]] > 0);
+                                     [mf_next->get_inst().out[r]] > 0); //不同warp之间存在的write，似乎out最多8,out[r]代表寄存器标号
               unsigned still_pending =
                   --m_pending_writes[mf_next->get_inst().warp_id()]
-                                    [mf_next->get_inst().out[r]];
+                                    [mf_next->get_inst().out[r]]; //相同地址的写入次数？
               if (!still_pending) {
                 m_pending_writes[mf_next->get_inst().warp_id()].erase(
                     mf_next->get_inst().out[r]);
                 m_scoreboard->releaseRegister(mf_next->get_inst().warp_id(),
-                                              mf_next->get_inst().out[r]);
-                m_core->warp_inst_complete(mf_next->get_inst());
+                                              mf_next->get_inst().out[r]); //去除指令依赖
+                m_core->warp_inst_complete(mf_next->get_inst()); //指令执行完成
               }
             }
 

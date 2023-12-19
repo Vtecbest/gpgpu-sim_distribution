@@ -1778,7 +1778,7 @@ enum cache_request_status data_cache::access(new_addr_type addr, mem_fetch *mf,
 enum cache_request_status l1_cache::access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events) {
-  return data_cache::access(addr, mf, time, events);
+  return data_cache::access(addr, mf, time, events); //调用的是data cache的access
 }
 
 // The l2 cache access function calls the base data_cache access
