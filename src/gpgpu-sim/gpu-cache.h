@@ -55,6 +55,11 @@ enum cache_request_status {
   NUM_CACHE_REQUEST_STATUS
 };
 
+enum victim_request_status{
+  HIT=0,
+  MISS
+};
+
 enum cache_reservation_fail_reason {
   LINE_ALLOC_FAIL = 0,  // all line are reserved
   MISS_QUEUE_FULL,      // MISS queue (i.e. interconnect or DRAM) is full
@@ -159,6 +164,23 @@ struct cache_block_t {
 
   new_addr_type m_tag;
   new_addr_type m_block_addr;
+};
+struct victim_block 
+{
+  victim_block(){
+    m_tag = 0;
+  }
+  void allocate(new_addr_type tag,unsigned time){
+    m_tag =tag;
+    m_alloc_time=time;
+  }
+  void flush(){
+    m_tag =0;
+    m_alloc_time=0;
+  }
+  new_addr_type m_tag;
+  unsigned long long m_alloc_time;
+
 };
 
 struct line_cache_block : public cache_block_t {
@@ -1015,6 +1037,36 @@ class tag_array {
   typedef tr1_hash_map<new_addr_type, unsigned> line_table;
   line_table pending_lines;
 };
+
+
+class victim_tag_array  {
+  public:
+    victim_tag_array(cache_config &config, int core_id, int type_id);
+    ~victim_tag_array();
+    enum victim_request_status probe (new_addr_type addr,  unsigned m_wid                             
+                                  ) const;
+    enum victim_request_status access(new_addr_type addr, unsigned time,
+                                 mem_fetch *mf);
+  // enum victim_request_status access(new_addr_type addr, unsigned time,
+  //                                  unsigned &idx, bool &wb,
+  //                                  evicted_block_info &evicted, mem_fetch *mf);
+  void fill(new_addr_type addr, unsigned time, unsigned m_wid);
+  void flush(unsigned m_wid);
+
+protected:
+victim_block **m_lines; //没有派生基类，不用双重指针，但是是二维数组,目前不确定是否需要将way纳入考虑
+cache_config &m_config;
+unsigned m_victim_hit;
+unsigned m_access;
+void init(int core_id, int type_id);
+int m_core_id;
+int m_type_id;
+bool is_used;
+       // flush finished warp
+
+
+} ;
+
 
 class mshr_table {
  public:

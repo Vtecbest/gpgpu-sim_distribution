@@ -99,7 +99,7 @@ class thread_ctx_t {
   bool m_active;
 };
 
-class shd_warp_t {
+class shd_warp_t {//一些warp的基本信息
  public:
   shd_warp_t(class shader_core_ctx *shader, unsigned warp_size)
       : m_shader(shader), m_warp_size(warp_size) {
@@ -375,7 +375,7 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
                  register_set *dp_out, register_set *sfu_out,
                  register_set *int_out, register_set *tensor_core_out,
                  std::vector<register_set *> &spec_cores_out,
-                 register_set *mem_out, int id)
+                 register_set *mem_out, int id) //需要添加来自VTA的信息
       : m_supervised_warps(),
         m_stats(stats),
         m_shader(shader),
@@ -428,6 +428,8 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
     ORDERED_PRIORITY_FUNC_ONLY,
     NUM_ORDERING,
   };
+
+
   template <typename U>
   void order_by_priority(
       std::vector<U> &result_list, const typename std::vector<U> &input_list,
@@ -478,10 +480,32 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
   std::vector<register_set *> &m_spec_cores_out;
   unsigned m_num_issued_last_cycle;
   unsigned m_current_turn_warp;
-
   int m_id;
 };
 
+class LSS{
+  public:
+  LSS(victim_tag_array *victim_tag):
+    m_victim_tag(victim_tag)
+    {}
+  
+  void LLD_hit (unsigned warp_id);
+
+  void Ins_issued (int num);
+  std::vector<bool> Cutoff_test(std::vector<unsigned> &m_Score, std::vector<unsigned> &warp_priority);
+  friend class scheduler_unit;
+  void update_cum_cutoff(unsigned active_warp_num);
+
+  protected:
+  victim_tag_array *m_victim_tag;
+  unsigned long long Ins_issued_total;
+  unsigned long long VTA_hit_total;
+  unsigned base_score;
+  std::vector<unsigned>m_Score;
+  std::vector<unsigned> warp_priority;
+  unsigned Cum_LLS_Cutoff;
+
+};
 class lrr_scheduler : public scheduler_unit {
  public:
   lrr_scheduler(shader_core_stats *stats, shader_core_ctx *shader,
@@ -1411,7 +1435,7 @@ class ldst_unit : public pipelined_simd_unit {
             shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
             Scoreboard *scoreboard, const shader_core_config *config,
             const memory_config *mem_config, shader_core_stats *stats,
-            unsigned sid, unsigned tpc, l1_cache *new_l1d_cache);
+            unsigned sid, unsigned tpc, l1_cache *new_l1d_cache, victim_tag_array *new_victim_tag);
   void init(mem_fetch_interface *icnt,
             shader_core_mem_fetch_allocator *mf_allocator,
             shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
@@ -1448,6 +1472,7 @@ class ldst_unit : public pipelined_simd_unit {
   tex_cache *m_L1T;        // texture cache
   read_only_cache *m_L1C;  // constant cache
   l1_cache *m_L1D;         // data cache
+  victim_tag_array *m_victim_tag;  //在lsu里面直接添加VTA
   std::map<unsigned /*warp_id*/,
            std::map<unsigned /*regnum*/, unsigned /*count*/>>
       m_pending_writes;

@@ -1110,7 +1110,7 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   m_warp[warp_id]->set_next_pc(next_inst->pc + next_inst->isize);
 }
 
-void shader_core_ctx::issue() {
+void shader_core_ctx::issue() { //这个地方负责将准备好的warp进行发射,依次使用core里面的schedulers
   // Ensure fair round robin issu between schedulers
   unsigned j;
   for (unsigned i = 0; i < schedulers.size(); i++) {
@@ -1195,6 +1195,50 @@ void scheduler_unit::order_rrr(
     result_list.push_back(&warp(m_current_turn_warp));
   }
 }
+
+LSS::LSS(victim_tag_array *victim_tag):
+    m_victim_tag(victim_tag){
+      Ins_issued_total=0;
+      VTA_hit_total=0;
+      base_score=0;
+      m_Score(5,base_score);
+      warp_priority(5,base_score);
+      Cum_LLS_Cutoff= 0;
+    }
+
+void LSS::update_cum_cutoff(unsigned active_warp_num){ //在哪发现active warp的具体数量？
+  Cum_LLS_Cutoff =active_warp_num * 20; //base score tobe tuned;
+}
+
+
+void LSS::LLD_hit(unsigned warp_id,std::vector<unsigned> &warp_priority){
+    VTA_hit_total++;
+    unsigned score=(Ins_issued_total/VTA_hit_total) *0.1*Cum_LLS_Cutoff;
+    m_Score[warp_id]=score;
+    if (warp_id<warp_priority.size()){
+      std::rotate(warp_priority.begin(),warp_priority.begin()+warp_id,warp_priority.begin()+warp_id+1);
+    }
+}
+
+
+
+void LSS::Ins_issued(int num){
+  Ins_issued_total++;
+}
+
+std::vector<bool> LSS::Cutoff_test(std::vector<unsigned> &m_Score, std::vector<unsigned> &warp_priority){
+  std::vector<bool> can_issue(m_Score.size(), false);
+  unsigned cum_score=0;
+  for (unsigned j=0;j<m_Score.size();j++){
+    if (cum_score<Cum_LLS_Cutoff){
+      can_issue[warp_priority[j]]=true;
+    }
+    cum_score+= m_Score[j];
+  }
+  return can_issue;
+}
+
+
 /**
  * A general function to order things in an priority-based way.
  * The core usage of the function is similar to order_lrr.
@@ -1250,13 +1294,17 @@ void scheduler_unit::cycle() {
   bool issued_inst = false;  // of these we issued one
 
   order_warps();
+  std::vector<bool> can_issue_not =LSS.Cutoff_test(&LSS.m_Score, &LSS.warp_priority);  //输入参数没有确定好
   for (std::vector<shd_warp_t *>::const_iterator iter =
            m_next_cycle_prioritized_warps.begin();
        iter != m_next_cycle_prioritized_warps.end(); iter++) {
     // Don't consider warps that are not yet valid
-    if ((*iter) == NULL || (*iter)->done_exit()) {
+    if ((*iter) == NULL || (*iter)->done_exit() ) {//todo 这里面需要有个来自LSS的can issue
+      // if((*iter)->done_exit()){
+      // LSS.active_warp_num--;
+      // }
       continue;
-    }
+    }//一直找所有order里面warp ins valid的
     SCHED_DPRINTF("Testing (warp_id %u, dynamic_warp_id %u)\n",
                   (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
     unsigned warp_id = (*iter)->get_warp_id();
@@ -1296,9 +1344,9 @@ void scheduler_unit::cycle() {
       bool valid = warp(warp_id).ibuffer_next_valid();
       bool warp_inst_issued = false;
       unsigned pc, rpc;
-      m_shader->get_pdom_stack_top_info(warp_id, pI, &pc, &rpc);
+      m_shader->get_pdom_stack_top_info(warp_id, pI, &pc, &rpc); //检查数据流在simt stack里面对不对
       SCHED_DPRINTF(
-          "Warp (warp_id %u, dynamic_warp_id %u) has valid instruction (%s)\n",
+          "Warp (warp_id %u, dynamic_warp_id %u) has valid instruction (%s)\n", //dynamic warp id是什么？
           (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id(),
           m_shader->m_config->gpgpu_ctx->func_sim->ptx_get_insn_str(pc)
               .c_str());
@@ -1314,7 +1362,7 @@ void scheduler_unit::cycle() {
           warp(warp_id).ibuffer_flush();
         } else {
           valid_inst = true;
-          if (!m_scoreboard->checkCollision(warp_id, pI)) {
+          if (!m_scoreboard->checkCollision(warp_id, pI)) { //检查是否有寄存器依赖在scoreboard里面
             SCHED_DPRINTF(
                 "Warp (warp_id %u, dynamic_warp_id %u) passes scoreboard\n",
                 (*iter)->get_warp_id(), (*iter)->get_dynamic_warp_id());
@@ -1329,10 +1377,13 @@ void scheduler_unit::cycle() {
                 (pI->op == MEMORY_BARRIER_OP) ||
                 (pI->op == TENSOR_CORE_LOAD_OP) ||
                 (pI->op == TENSOR_CORE_STORE_OP)) {
+              if(    !can_issue_not[(*iter)->get_warp_id()]){
+                continue;
+              }
               if (m_mem_out->has_free(m_shader->m_config->sub_core_model,
                                       m_id) &&
                   (!diff_exec_units ||
-                   previous_issued_inst_exec_type != exec_unit_type_t::MEM)) {
+                   previous_issued_inst_exec_type != exec_unit_type_t::MEM)) { //为什么要检查之前的是不是访存？
                 m_shader->issue_warp(*m_mem_out, pI, active_mask, warp_id,
                                      m_id);
                 issued++;
@@ -1534,8 +1585,8 @@ void scheduler_unit::cycle() {
         m_stats->dual_issue_nums[m_id]++;
       else
         abort();  // issued should be > 0
-
-      break;
+      LSS.Ins_issued(issued);  //和LSS发送issue指令。
+      break;  //这里面的break用于在找到可issue的指令后跳出循环
     }
   }
 
@@ -2175,6 +2226,11 @@ void ldst_unit::L1_latency_queue_cycle() {//主要负责访存的单元
           for (unsigned i = 0; i < dec_ack; ++i) m_core->store_ack(mf_next);
           if (!write_sent && !read_sent) delete mf_next;
         }
+        if (status ==MISS){
+          enum victim_request_status victim_status = m_victim_tag->access(mf_next->get_addr(),m_core->get_gpu()->gpu_sim_cycle +
+                            m_core->get_gpu()->gpu_tot_sim_cycle,mf_next);
+          //todo 需要有一个反馈给LSS的信号            
+        }
       }
     }
 
@@ -2577,6 +2633,7 @@ void ldst_unit::init(mem_fetch_interface *icnt,
                               get_shader_constant_cache_id(), icnt,
                               IN_L1C_MISS_QUEUE);
   m_L1D = NULL;
+  m_victim_tag =NULL;
   m_mem_rc = NO_RC_FAIL;
   m_num_writeback_clients =
       5;  // = shared memory, global/local (uncached), L1D, L1T, L1C
@@ -2619,9 +2676,10 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
                      shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
                      Scoreboard *scoreboard, const shader_core_config *config,
                      const memory_config *mem_config, shader_core_stats *stats,
-                     unsigned sid, unsigned tpc, l1_cache *new_l1d_cache)
+                     unsigned sid, unsigned tpc, l1_cache *new_l1d_cache, victim_tag_array *new_victim_tag)
     : pipelined_simd_unit(NULL, config, 3, core, 0),
       m_L1D(new_l1d_cache),
+      m_victim_tag(new_victim_tag),
       m_next_wb(config) {
   init(icnt, mf_allocator, core, operand_collector, scoreboard, config,
        mem_config, stats, sid, tpc);
@@ -3617,7 +3675,7 @@ void shader_core_config::set_pipeline_latency() {
   max_tensor_core_latency = tensor_latency;
 }
 
-void shader_core_ctx::cycle() {
+void shader_core_ctx::cycle() { //参与到仿真的部分
   if (!isactive() && get_not_completed() == 0) return;
 
   m_stats->shader_cycles[m_sid]++;
