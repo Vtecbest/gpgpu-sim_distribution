@@ -375,7 +375,7 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
                  register_set *dp_out, register_set *sfu_out,
                  register_set *int_out, register_set *tensor_core_out,
                  std::vector<register_set *> &spec_cores_out,
-                 register_set *mem_out, int id) //需要添加来自VTA的信息
+                 register_set *mem_out, int id,class LSS *LSS_in) //需要添加来自VTA的信息
       : m_supervised_warps(),
         m_stats(stats),
         m_shader(shader),
@@ -389,6 +389,7 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
         m_tensor_core_out(tensor_core_out),
         m_mem_out(mem_out),
         m_spec_cores_out(spec_cores_out),
+        m_LSS(LSS_in),
         m_id(id) {}
   virtual ~scheduler_unit() {}
   virtual void add_supervised_warp_id(int i) {
@@ -397,7 +398,7 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
   virtual void done_adding_supervised_warps() {
     m_last_supervised_issued = m_supervised_warps.end();
   }
-
+  LSS *m_LSS;
   // The core scheduler cycle method is meant to be common between
   // all the derived schedulers.  The scheduler's behaviour can be
   // modified by changing the contents of the m_next_cycle_prioritized_warps
@@ -481,27 +482,31 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
   unsigned m_num_issued_last_cycle;
   unsigned m_current_turn_warp;
   int m_id;
-};
 
+};
 class LSS{
   public:
-  LSS(victim_tag_array *victim_tag):
-    m_victim_tag(victim_tag)
-    {}
+  LSS(int active_warps,unsigned m_warp_count)
+    {
+      Ins_issued_total=1;
+      VTA_hit_total=0;
+      base_score=100;
+      m_Score=std::vector<unsigned>(m_warp_count,base_score);
+      warp_priority=std::vector<unsigned>(m_warp_count,base_score);
+      Cum_LLS_Cutoff=active_warps*base_score ;
+    }
   
   void LLD_hit (unsigned warp_id);
-
-  void Ins_issued (int num);
-  std::vector<bool> Cutoff_test(std::vector<unsigned> &m_Score, std::vector<unsigned> &warp_priority);
-  friend class scheduler_unit;
-  void update_cum_cutoff(unsigned active_warp_num);
-
-  protected:
-  victim_tag_array *m_victim_tag;
   unsigned long long Ins_issued_total;
   unsigned long long VTA_hit_total;
+  void Ins_issued (int num);
+  std::vector<bool> Cutoff_test();
+  void update_cum_cutoff(int active_warps);
+
+  protected:
+
   unsigned base_score;
-  std::vector<unsigned>m_Score;
+  std::vector<unsigned> m_Score;
   std::vector<unsigned> warp_priority;
   unsigned Cum_LLS_Cutoff;
 
@@ -514,10 +519,10 @@ class lrr_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id)
+                register_set *mem_out, int id,class LSS *LSS_in)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id,LSS_in) {}
   virtual ~lrr_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -533,10 +538,10 @@ class rrr_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id)
+                register_set *mem_out, int id,class LSS *LSS_in)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id,LSS_in) {}
   virtual ~rrr_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -552,10 +557,10 @@ class gto_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id)
+                register_set *mem_out, int id,class LSS *LSS_in)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id,LSS_in) {}
   virtual ~gto_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -571,10 +576,10 @@ class oldest_scheduler : public scheduler_unit {
                    register_set *dp_out, register_set *sfu_out,
                    register_set *int_out, register_set *tensor_core_out,
                    std::vector<register_set *> &spec_cores_out,
-                   register_set *mem_out, int id)
+                   register_set *mem_out, int id,class LSS *LSS_in)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id,LSS_in) {}
   virtual ~oldest_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -591,10 +596,10 @@ class two_level_active_scheduler : public scheduler_unit {
                              register_set *sfu_out, register_set *int_out,
                              register_set *tensor_core_out,
                              std::vector<register_set *> &spec_cores_out,
-                             register_set *mem_out, int id, char *config_str)
+                             register_set *mem_out, int id,class LSS *LSS_in, char *config_str)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id),
+                       mem_out, id,LSS_in),
         m_pending_warps() {
     unsigned inner_level_readin;
     unsigned outer_level_readin;
@@ -641,7 +646,7 @@ class swl_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id, char *config_string);
+                register_set *mem_out, int id,class LSS *LSS_in, char *config_string);
   virtual ~swl_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -1365,14 +1370,14 @@ class shader_memory_interface;
 class shader_core_mem_fetch_allocator;
 class cache_t;
 
-class ldst_unit : public pipelined_simd_unit {
+class ldst_unit : public pipelined_simd_unit {  //是否应该将其设置为scheduler的友元？CCWS
  public:
   ldst_unit(mem_fetch_interface *icnt,
             shader_core_mem_fetch_allocator *mf_allocator,
             shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
             Scoreboard *scoreboard, const shader_core_config *config,
             const memory_config *mem_config, class shader_core_stats *stats,
-            unsigned sid, unsigned tpc);
+            unsigned sid, unsigned tpc, LSS *LSS_in);
 
   // Add a structure to record the LDGSTS instructions,
   // similar to m_pending_writes, but since LDGSTS does not have a output register
@@ -1392,7 +1397,7 @@ class ldst_unit : public pipelined_simd_unit {
   void flush();
   void invalidate();
   void writeback();
-
+  LSS *m_LSS;
   // accessors
   virtual unsigned clock_multiplier() const;
 
@@ -1435,7 +1440,7 @@ class ldst_unit : public pipelined_simd_unit {
             shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
             Scoreboard *scoreboard, const shader_core_config *config,
             const memory_config *mem_config, shader_core_stats *stats,
-            unsigned sid, unsigned tpc, l1_cache *new_l1d_cache, victim_tag_array *new_victim_tag);
+            unsigned sid, unsigned tpc, l1_cache *new_l1d_cache);
   void init(mem_fetch_interface *icnt,
             shader_core_mem_fetch_allocator *mf_allocator,
             shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
@@ -1472,7 +1477,7 @@ class ldst_unit : public pipelined_simd_unit {
   tex_cache *m_L1T;        // texture cache
   read_only_cache *m_L1C;  // constant cache
   l1_cache *m_L1D;         // data cache
-  victim_tag_array *m_victim_tag;  //在lsu里面直接添加VTA
+  
   std::map<unsigned /*warp_id*/,
            std::map<unsigned /*regnum*/, unsigned /*count*/>>
       m_pending_writes;
@@ -2449,7 +2454,7 @@ class shader_core_ctx : public core_t {
   void create_front_pipeline();
   void create_schedulers();
   void create_exec_pipeline();
-
+  void create_LSS();
   // pure virtual methods implemented based on the current execution mode
   // (execution-driven vs trace-driven)
   virtual void init_warps(unsigned cta_id, unsigned start_thread,
@@ -2528,7 +2533,8 @@ class shader_core_ctx : public core_t {
   barrier_set_t m_barriers;
   ifetch_buffer_t m_inst_fetch_buffer;
   std::vector<register_set> m_pipeline_reg;
-  Scoreboard *m_scoreboard;
+  Scoreboard *m_scoreboard; //在create scheduler中被使用
+  LSS  *m_LSSs;
   opndcoll_rfu_t m_operand_collector;
   int m_active_warps;
   std::vector<register_set *> m_specilized_dispatch_reg;
@@ -2585,6 +2591,7 @@ class exec_shader_core_ctx : public shader_core_ctx {
       : shader_core_ctx(gpu, cluster, shader_id, tpc_id, config, mem_config,
                         stats) {
     create_front_pipeline();
+    //create_LSS();
     create_shd_warp();
     create_schedulers();
     create_exec_pipeline();

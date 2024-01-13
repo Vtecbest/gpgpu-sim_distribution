@@ -37,12 +37,10 @@
 #include "../tr1_hash_map.h"
 #include "gpu-misc.h"
 #include "mem_fetch.h"
-
 #include <iostream>
 #include "addrdec.h"
 
 #define MAX_DEFAULT_CACHE_SIZE_MULTIBLIER 4
-
 enum cache_block_state { INVALID = 0, RESERVED, VALID, MODIFIED };
 
 enum cache_request_status {
@@ -56,8 +54,8 @@ enum cache_request_status {
 };
 
 enum victim_request_status{
-  HIT=0,
-  MISS
+  VICTIM_HIT=0,
+  VICTIM_MISS
 };
 
 enum cache_reservation_fail_reason {
@@ -921,6 +919,7 @@ class cache_config {
   friend class memory_sub_partition;
 };
 
+
 class l1d_cache_config : public cache_config {
  public:
   l1d_cache_config() : cache_config() {}
@@ -1041,7 +1040,7 @@ class tag_array {
 
 class victim_tag_array  {
   public:
-    victim_tag_array(cache_config &config, int core_id, int type_id);
+    victim_tag_array(cache_config &config);
     ~victim_tag_array();
     enum victim_request_status probe (new_addr_type addr,  unsigned m_wid                             
                                   ) const;
@@ -1050,18 +1049,14 @@ class victim_tag_array  {
   // enum victim_request_status access(new_addr_type addr, unsigned time,
   //                                  unsigned &idx, bool &wb,
   //                                  evicted_block_info &evicted, mem_fetch *mf);
-  void fill(new_addr_type addr, unsigned time, unsigned m_wid);
-  void flush(unsigned m_wid);
+  void fill(new_addr_type m_tag, unsigned time, unsigned m_wid, unsigned idx);
+  // void flush(unsigned m_wid);
 
 protected:
 victim_block **m_lines; //没有派生基类，不用双重指针，但是是二维数组,目前不确定是否需要将way纳入考虑
 cache_config &m_config;
 unsigned m_victim_hit;
 unsigned m_access;
-void init(int core_id, int type_id);
-int m_core_id;
-int m_type_id;
-bool is_used;
        // flush finished warp
 
 
@@ -1621,12 +1616,12 @@ class data_cache : public baseline_cache {
   //! A general function that takes the result of a tag_array probe
   //  and performs the correspding functions based on the cache configuration
   //  The access fucntion calls this function
-  enum cache_request_status process_tag_probe(bool wr,
+  virtual enum cache_request_status process_tag_probe(bool wr,
                                               enum cache_request_status status,
                                               new_addr_type addr,
                                               unsigned cache_index,
                                               mem_fetch *mf, unsigned time,
-                                              std::list<cache_event> &events);
+                                              std::list<cache_event> &events);//这个事实上是处理相关hit miss后的进一步访存操作的
 
  protected:
   mem_fetch_allocator *m_memfetch_creator;
@@ -1678,7 +1673,7 @@ class data_cache : public baseline_cache {
       std::list<cache_event> &events,
       enum cache_request_status
           status);  // write-allocate with fetch-on-every-write
-  enum cache_request_status wr_miss_wa_lazy_fetch_on_read(
+  virtual enum cache_request_status wr_miss_wa_lazy_fetch_on_read(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events,
       enum cache_request_status status);  // write-allocate with read-fetch-only
@@ -1707,7 +1702,7 @@ class data_cache : public baseline_cache {
   enum cache_request_status (data_cache::*m_rd_miss)(
       new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
       std::list<cache_event> &events, enum cache_request_status status);
-  enum cache_request_status rd_miss_base(new_addr_type addr,
+  virtual enum cache_request_status rd_miss_base(new_addr_type addr,
                                          unsigned cache_index, mem_fetch *mf,
                                          unsigned time,
                                          std::list<cache_event> &events,
@@ -1722,16 +1717,80 @@ class l1_cache : public data_cache {
  public:
   l1_cache(const char *name, cache_config &config, int core_id, int type_id,
            mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
-           enum mem_fetch_status status, class gpgpu_sim *gpu)
+           enum mem_fetch_status status, class gpgpu_sim *gpu  )
       : data_cache(name, config, core_id, type_id, memport, mfcreator, status,
-                   L1_WR_ALLOC_R, L1_WRBK_ACC, gpu) {}
+                   L1_WR_ALLOC_R, L1_WRBK_ACC, gpu) {
+                  unsigned cache_lines_num = config.get_max_num_lines();
+                  // m_warp_id_array = new int[cache_lines_num];
+                  // for (unsigned i = 0; i < cache_lines_num; ++i) {
+                  //   m_warp_id_array[i] = 11;
+                  // }
+                  //m_victim_tag=new victim_tag_array( config);
 
-  virtual ~l1_cache() {}
+                  }
+  virtual void init(mem_fetch_allocator *mfcreator) override {
+    m_memfetch_creator = mfcreator;
+
+    // Set read hit function
+    m_rd_hit = &l1_cache::rd_hit_base;
+
+    // Set read miss function
+    m_rd_miss = &l1_cache::rd_miss_base;
+
+    // Set write hit function
+    switch (m_config.m_write_policy) {
+      // READ_ONLY is now a separate cache class, config is deprecated
+      case READ_ONLY:
+        assert(0 && "Error: Writable Data_cache set as READ_ONLY\n");
+        break;
+      case WRITE_BACK:
+        m_wr_hit = &l1_cache::wr_hit_wb;
+        break;
+      case WRITE_THROUGH:
+        m_wr_hit = &l1_cache::wr_hit_wt;
+        break;
+      case WRITE_EVICT:
+        m_wr_hit = &l1_cache::wr_hit_we;
+        break;
+      case LOCAL_WB_GLOBAL_WT:
+        m_wr_hit = &l1_cache::wr_hit_global_we_local_wb;
+        break;
+      default:
+        assert(0 && "Error: Must set valid cache write policy\n");
+        break;  // Need to set a write hit function
+    }
+
+    // Set write miss function
+    switch (m_config.m_write_alloc_policy) {
+      case NO_WRITE_ALLOCATE:
+        m_wr_miss = &l1_cache::wr_miss_no_wa;
+        break;
+      case WRITE_ALLOCATE:
+        m_wr_miss = &l1_cache::wr_miss_wa_naive;
+        break;
+      case FETCH_ON_WRITE:
+        m_wr_miss = &l1_cache::wr_miss_wa_fetch_on_write;
+        break;
+      case LAZY_FETCH_ON_READ:
+        m_wr_miss = &l1_cache::wr_miss_wa_lazy_fetch_on_read;
+        break;
+      default:
+        assert(0 && "Error: Must set valid cache write miss policy\n");
+        break;  // Need to set a write miss function
+    }
+  }
+
+  virtual ~l1_cache() {
+    // delete [] m_warp_id_array;
+     // delete[] m_victim_tag;
+  }
 
   virtual enum cache_request_status access(new_addr_type addr, mem_fetch *mf,
                                            unsigned time,
                                            std::list<cache_event> &events);
 
+  // int *m_warp_id_array;
+  //victim_tag_array *m_victim_tag;
  protected:
   l1_cache(const char *name, cache_config &config, int core_id, int type_id,
            mem_fetch_interface *memport, mem_fetch_allocator *mfcreator,
@@ -1739,6 +1798,31 @@ class l1_cache : public data_cache {
            class gpgpu_sim *gpu)
       : data_cache(name, config, core_id, type_id, memport, mfcreator, status,
                    new_tag_array, L1_WR_ALLOC_R, L1_WRBK_ACC, gpu) {}
+  
+  enum cache_request_status (l1_cache::*m_wr_miss)(
+      new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
+      std::list<cache_event> &events, enum cache_request_status status);
+  virtual enum cache_request_status rd_miss_base(new_addr_type addr,
+                                         unsigned cache_index, mem_fetch *mf,
+                                         unsigned time,
+                                         std::list<cache_event> &events,
+                                         enum cache_request_status status);
+  virtual enum cache_request_status wr_miss_wa_lazy_fetch_on_read(
+    new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
+    std::list<cache_event> &events,
+    enum cache_request_status status);  // write-allocate with read-fetch-only
+
+
+  enum cache_request_status (l1_cache::*m_rd_miss)(
+      new_addr_type addr, unsigned cache_index, mem_fetch *mf, unsigned time,
+      std::list<cache_event> &events, enum cache_request_status status);
+
+  virtual enum cache_request_status process_tag_probe(bool wr,
+                                              enum cache_request_status status,
+                                              new_addr_type addr,
+                                              unsigned cache_index,
+                                              mem_fetch *mf, unsigned time,
+                                              std::list<cache_event> &events);//这个事实上是处理相关hit miss后的进一步访存操作的
 };
 
 /// Models second level shared cache with global write-back

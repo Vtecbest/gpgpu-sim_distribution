@@ -1300,7 +1300,7 @@ class core_t {
         m_simt_stack(NULL),
         m_thread(NULL),
         m_warp_size(warp_size) {
-    m_warp_count = threads_per_shader / m_warp_size;
+    m_warp_count = threads_per_shader / m_warp_size;  //代表一个shader core里面包含的warp
     // Handle the case where the number of threads is not a
     // multiple of the warp size
     if (threads_per_shader % m_warp_size != 0) {

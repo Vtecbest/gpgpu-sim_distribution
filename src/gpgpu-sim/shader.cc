@@ -211,7 +211,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i,m_LSSs));
         break;
       case CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE:
         schedulers.push_back(new two_level_active_scheduler(
@@ -219,7 +219,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i, m_config->gpgpu_scheduler_string));
+            &m_pipeline_reg[ID_OC_MEM], i,m_LSSs, m_config->gpgpu_scheduler_string));
         break;
       case CONCRETE_SCHEDULER_GTO:
         schedulers.push_back(new gto_scheduler(
@@ -227,7 +227,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i,m_LSSs));
         break;
       case CONCRETE_SCHEDULER_RRR:
         schedulers.push_back(new rrr_scheduler(
@@ -235,7 +235,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i,m_LSSs));
         break;
       case CONCRETE_SCHEDULER_OLDEST_FIRST:
         schedulers.push_back(new oldest_scheduler(
@@ -243,7 +243,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i,m_LSSs));
         break;
       case CONCRETE_SCHEDULER_WARP_LIMITING:
         schedulers.push_back(new swl_scheduler(
@@ -251,7 +251,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i, m_config->gpgpu_scheduler_string));
+            &m_pipeline_reg[ID_OC_MEM], i,m_LSSs, m_config->gpgpu_scheduler_string));
         break;
       default:
         abort();
@@ -268,6 +268,12 @@ void shader_core_ctx::create_schedulers() {
   }
 }
 
+
+void shader_core_ctx::create_LSS(){
+  for (unsigned i = 0; i < m_config->gpgpu_num_sched_per_core; i++) {
+  m_LSSs =new LSS(m_active_warps, m_config->max_warps_per_shader);
+  }
+}
 void shader_core_ctx::create_exec_pipeline() {
   // op collector configuration
   enum { SP_CUS, DP_CUS, SFU_CUS, TENSOR_CORE_CUS, INT_CUS, MEM_CUS, GEN_CUS };
@@ -450,7 +456,7 @@ void shader_core_ctx::create_exec_pipeline() {
 
   m_ldst_unit = new ldst_unit(m_icnt, m_mem_fetch_allocator, this,
                               &m_operand_collector, m_scoreboard, m_config,
-                              m_memory_config, m_stats, m_sid, m_tpc);
+                              m_memory_config, m_stats, m_sid, m_tpc,m_LSSs);
   m_fu.push_back(m_ldst_unit);
   m_dispatch_port.push_back(ID_OC_MEM);
   m_issue_port.push_back(OC_EX_MEM);
@@ -574,6 +580,7 @@ void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
       ++m_dynamic_warp_id;
       m_not_completed += n_active;
       ++m_active_warps;
+      //m_LSSs->update_cum_cutoff(m_active_warps);
     }
   }
 }
@@ -962,6 +969,7 @@ void shader_core_ctx::fetch() {
           }
           if (did_exit) m_warp[warp_id]->set_done_exit();
           --m_active_warps;
+          //m_LSSs->update_cum_cutoff(m_active_warps);
           assert(m_active_warps >= 0);
         }
 
@@ -1196,24 +1204,16 @@ void scheduler_unit::order_rrr(
   }
 }
 
-LSS::LSS(victim_tag_array *victim_tag):
-    m_victim_tag(victim_tag){
-      Ins_issued_total=0;
-      VTA_hit_total=0;
-      base_score=0;
-      m_Score(5,base_score);
-      warp_priority(5,base_score);
-      Cum_LLS_Cutoff= 0;
-    }
 
-void LSS::update_cum_cutoff(unsigned active_warp_num){ //在哪发现active warp的具体数量？
-  Cum_LLS_Cutoff =active_warp_num * 20; //base score tobe tuned;
+
+void LSS::update_cum_cutoff(int active_warps){ //在哪发现active warp的具体数量？
+  Cum_LLS_Cutoff =active_warps * base_score; //base score tobe tuned;
 }
 
 
-void LSS::LLD_hit(unsigned warp_id,std::vector<unsigned> &warp_priority){
+void LSS::LLD_hit(unsigned warp_id){
     VTA_hit_total++;
-    unsigned score=(Ins_issued_total/VTA_hit_total) *0.1*Cum_LLS_Cutoff;
+    unsigned score=(VTA_hit_total/Ins_issued_total) *8*Cum_LLS_Cutoff;
     m_Score[warp_id]=score;
     if (warp_id<warp_priority.size()){
       std::rotate(warp_priority.begin(),warp_priority.begin()+warp_id,warp_priority.begin()+warp_id+1);
@@ -1226,7 +1226,7 @@ void LSS::Ins_issued(int num){
   Ins_issued_total++;
 }
 
-std::vector<bool> LSS::Cutoff_test(std::vector<unsigned> &m_Score, std::vector<unsigned> &warp_priority){
+std::vector<bool> LSS::Cutoff_test(){
   std::vector<bool> can_issue(m_Score.size(), false);
   unsigned cum_score=0;
   for (unsigned j=0;j<m_Score.size();j++){
@@ -1294,15 +1294,12 @@ void scheduler_unit::cycle() {
   bool issued_inst = false;  // of these we issued one
 
   order_warps();
-  std::vector<bool> can_issue_not =LSS.Cutoff_test(&LSS.m_Score, &LSS.warp_priority);  //输入参数没有确定好
+  //std::vector<bool> can_issue_not =m_LSS->Cutoff_test();  
   for (std::vector<shd_warp_t *>::const_iterator iter =
            m_next_cycle_prioritized_warps.begin();
        iter != m_next_cycle_prioritized_warps.end(); iter++) {
     // Don't consider warps that are not yet valid
     if ((*iter) == NULL || (*iter)->done_exit() ) {//todo 这里面需要有个来自LSS的can issue
-      // if((*iter)->done_exit()){
-      // LSS.active_warp_num--;
-      // }
       continue;
     }//一直找所有order里面warp ins valid的
     SCHED_DPRINTF("Testing (warp_id %u, dynamic_warp_id %u)\n",
@@ -1377,9 +1374,13 @@ void scheduler_unit::cycle() {
                 (pI->op == MEMORY_BARRIER_OP) ||
                 (pI->op == TENSOR_CORE_LOAD_OP) ||
                 (pI->op == TENSOR_CORE_STORE_OP)) {
-              if(    !can_issue_not[(*iter)->get_warp_id()]){
-                continue;
-              }
+              // if(    !can_issue_not[(*iter)->get_warp_id()]){
+              //   printf("shit\n");
+              //  // continue;
+              // }
+       
+                printf("fuck\n");
+            
               if (m_mem_out->has_free(m_shader->m_config->sub_core_model,
                                       m_id) &&
                   (!diff_exec_units ||
@@ -1585,7 +1586,8 @@ void scheduler_unit::cycle() {
         m_stats->dual_issue_nums[m_id]++;
       else
         abort();  // issued should be > 0
-      LSS.Ins_issued(issued);  //和LSS发送issue指令。
+      // m_LSS->Ins_issued(issued);  //和LSS发送issue指令。
+      // printf("%lld",m_LSS->Ins_issued_total);
       break;  //这里面的break用于在找到可issue的指令后跳出循环
     }
   }
@@ -1717,10 +1719,10 @@ swl_scheduler::swl_scheduler(shader_core_stats *stats, shader_core_ctx *shader,
                              register_set *sfu_out, register_set *int_out,
                              register_set *tensor_core_out,
                              std::vector<register_set *> &spec_cores_out,
-                             register_set *mem_out, int id, char *config_string)
+                             register_set *mem_out, int id,LSS *LSS_in, char *config_string)
     : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                      sfu_out, int_out, tensor_core_out, spec_cores_out, mem_out,
-                     id) {
+                     id,LSS_in) {
   unsigned m_prioritization_readin;
   int ret = sscanf(config_string, "warp_limiting:%d:%d",
                    &m_prioritization_readin, &m_num_warps_to_limit);
@@ -2148,7 +2150,7 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
   }
 }
 
-void ldst_unit::L1_latency_queue_cycle() {//主要负责访存的单元
+void ldst_unit::L1_latency_queue_cycle() {//主要负责访存cycle计数的单元
   for (unsigned int j = 0; j < m_config->m_L1D_config.l1_banks; j++) {
     if ((l1_latency_queue[j][0]) != NULL) {
       mem_fetch *mf_next = l1_latency_queue[j][0];//访问的是stage=0的memory request
@@ -2158,7 +2160,11 @@ void ldst_unit::L1_latency_queue_cycle() {//主要负责访存的单元
                         m_core->get_gpu()->gpu_sim_cycle +
                             m_core->get_gpu()->gpu_tot_sim_cycle,
                         events);
-
+      // enum victim_request_status victim_probe_status = (m_L1D->m_victim_tag)->access(mf_next->get_addr(),m_core->get_gpu()->gpu_sim_cycle +
+      //                       m_core->get_gpu()->gpu_tot_sim_cycle,mf_next);
+      //   if(victim_probe_status== VICTIM_HIT){
+      //   //  m_LSS->LLD_hit(mf_next->get_wid());
+      //   }
       bool write_sent = was_write_sent(events);
       bool read_sent = was_read_sent(events);
 
@@ -2225,11 +2231,6 @@ void ldst_unit::L1_latency_queue_cycle() {//主要负责访存的单元
           mf_next->set_reply();
           for (unsigned i = 0; i < dec_ack; ++i) m_core->store_ack(mf_next);
           if (!write_sent && !read_sent) delete mf_next;
-        }
-        if (status ==MISS){
-          enum victim_request_status victim_status = m_victim_tag->access(mf_next->get_addr(),m_core->get_gpu()->gpu_sim_cycle +
-                            m_core->get_gpu()->gpu_tot_sim_cycle,mf_next);
-          //todo 需要有一个反馈给LSS的信号            
         }
       }
     }
@@ -2633,7 +2634,6 @@ void ldst_unit::init(mem_fetch_interface *icnt,
                               get_shader_constant_cache_id(), icnt,
                               IN_L1C_MISS_QUEUE);
   m_L1D = NULL;
-  m_victim_tag =NULL;
   m_mem_rc = NO_RC_FAIL;
   m_num_writeback_clients =
       5;  // = shared memory, global/local (uncached), L1D, L1T, L1C
@@ -2648,7 +2648,7 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
                      shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
                      Scoreboard *scoreboard, const shader_core_config *config,
                      const memory_config *mem_config, shader_core_stats *stats,
-                     unsigned sid, unsigned tpc)
+                     unsigned sid, unsigned tpc, LSS *LSS_in)
     : pipelined_simd_unit(NULL, config, config->smem_latency, core, 0),
       m_next_wb(config) {
   assert(config->smem_latency > 1);
@@ -2660,7 +2660,7 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
     m_L1D = new l1_cache(L1D_name, m_config->m_L1D_config, m_sid,
                          get_shader_normal_cache_id(), m_icnt, m_mf_allocator,
                          IN_L1D_MISS_QUEUE, core->get_gpu());
-
+    m_LSS =LSS_in;
     l1_latency_queue.resize(m_config->m_L1D_config.l1_banks);
     assert(m_config->m_L1D_config.l1_latency > 0);
 
@@ -2676,10 +2676,9 @@ ldst_unit::ldst_unit(mem_fetch_interface *icnt,
                      shader_core_ctx *core, opndcoll_rfu_t *operand_collector,
                      Scoreboard *scoreboard, const shader_core_config *config,
                      const memory_config *mem_config, shader_core_stats *stats,
-                     unsigned sid, unsigned tpc, l1_cache *new_l1d_cache, victim_tag_array *new_victim_tag)
+                     unsigned sid, unsigned tpc, l1_cache *new_l1d_cache)
     : pipelined_simd_unit(NULL, config, 3, core, 0),
       m_L1D(new_l1d_cache),
-      m_victim_tag(new_victim_tag),
       m_next_wb(config) {
   init(icnt, mf_allocator, core, operand_collector, scoreboard, config,
        mem_config, stats, sid, tpc);
